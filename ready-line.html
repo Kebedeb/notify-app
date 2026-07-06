@@ -1,0 +1,718 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>Ready Line — Order Pickup Board</title>
+
+<!-- ============================================================
+     EXTERNAL LIBRARIES (loaded from CDN, need internet access)
+     - Tailwind: utility CSS classes used all over the markup below
+     - SheetJS (xlsx): reads/writes Excel files entirely in the browser
+     ============================================================ -->
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+
+<style>
+  /* ============================================================
+     DESIGN TOKENS
+     All colors live here as CSS variables. To re-theme the whole
+     app, this is the only place you need to change hex values.
+     ============================================================ */
+  :root{
+    --bg: #EEF1F6;            /* page background */
+    --ink: #12161F;           /* main text color */
+    --ticket: #FFFFFF;        /* card background */
+    --muted: #67707E;         /* secondary/gray text */
+    --line: #DCE1E8;          /* hairline borders */
+
+    /* one color pair per order status: solid + a soft tint for chips/badges */
+    --pending: #E8A317;       --pending-soft: #FCEFD3;   /* waiting, not texted yet */
+    --notified: #2F6FED;      --notified-soft: #DCE7FE;  /* "Notify Ready" text sent */
+    --reminded: #7B4FE0;      --reminded-soft: #E7DFFC;  /* "Send Reminder" text sent */
+    --done: #16A34A;          --done-soft: #D9F2E3;      /* picked up */
+  }
+
+  html, body { background: var(--bg); }
+  * { -webkit-tap-highlight-color: transparent; } /* removes gray flash on tap (iOS) */
+  body { font-family: 'Inter', system-ui, sans-serif; color: var(--ink); }
+  .font-display { font-family: 'Space Grotesk', system-ui, sans-serif; } /* headings */
+  .font-mono { font-family: 'IBM Plex Mono', monospace; } /* timeslot / phone numbers */
+
+  /* Any button meant to be tapped with a thumb gets this: tall + no accidental
+     double-tap zoom + no blue text-selection highlight while tapping repeatedly. */
+  .tap-btn {
+    min-height: 52px;
+    touch-action: manipulation;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  .tap-btn:active { transform: scale(0.97); } /* quick visual "press" feedback */
+
+  /* ----- Ticket card shell -----
+     Each order renders as one of these. It's built to look like a tear-off
+     paper ticket: a colored status stripe on the left, then a dashed
+     "perforation" line with two circular notches cut out of the sides. */
+  .ticket-card {
+    position: relative;
+    background: var(--ticket);
+    border-radius: 16px;
+    box-shadow: 0 1px 2px rgba(18,22,31,0.04), 0 6px 16px rgba(18,22,31,0.06);
+    overflow: hidden;
+    border: 1px solid var(--line);
+  }
+
+  /* colored stripe down the left edge of each card - changes with status */
+  .status-rail {
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 7px;
+    transition: background-color 0.25s ease;
+  }
+  .rail-pending  { background: var(--pending); }
+  .rail-notified { background: var(--notified); }
+  .rail-reminded { background: var(--reminded); }
+  .rail-done     { background: var(--done); }
+
+  /* the dashed "tear here" line between the info section and the buttons */
+  .perforation {
+    position: relative;
+    height: 0;
+    border-top: 2px dashed var(--line);
+    margin: 0 18px;
+  }
+  /* the two little circles that make it look like a punched ticket notch */
+  .perforation::before, .perforation::after {
+    content: "";
+    position: absolute;
+    top: -9px;
+    width: 18px; height: 18px;
+    background: var(--bg); /* matches page background so it looks "cut out" */
+    border-radius: 50%;
+  }
+  .perforation::before { left: -27px; }
+  .perforation::after  { right: -27px; }
+
+  /* small rounded status label ("Waiting" / "Texted" / etc.) top-right of each card */
+  .status-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 4px 10px;
+    border-radius: 999px;
+  }
+  .chip-pending  { background: var(--pending-soft);  color: #8A5C0A; }
+  .chip-notified { background: var(--notified-soft); color: #1D4FB8; }
+  .chip-reminded { background: var(--reminded-soft); color: #5A34AD; }
+  .chip-done     { background: var(--done-soft);     color: #0F7A3C; }
+
+  /* file drop zone */
+  .dropzone {
+    border: 2px dashed #B9C2CF;
+    transition: border-color 0.2s ease, background-color 0.2s ease;
+  }
+  .dropzone.drag-over { /* highlighted while a file is being dragged over it */
+    border-color: var(--notified);
+    background-color: var(--notified-soft);
+  }
+
+  /* ----- Action button color states -----
+     Each of the 3 buttons has a "not done yet" look and a "done" look. */
+  .btn-notify        { background: var(--pending);      color: #3B2900; }
+  .btn-notify:disabled     { background: #D8DEE6; color: #9AA4B2; }
+  .btn-notified-done { background: var(--notified-soft); color: #1D4FB8; border: 1.5px solid var(--notified); }
+
+  .btn-reminder       { background: var(--notified); color: #fff; }
+  .btn-reminder:disabled   { background: #E4E8ED; color: #B0B8C2; }
+  .btn-reminded-done  { background: var(--reminded-soft); color: #5A34AD; border: 1.5px solid var(--reminded); }
+
+  .btn-pickup      { background: #F1F3F6; color: var(--ink); border: 1.5px solid var(--line); }
+  .btn-pickup-done { background: var(--done); color: #fff; }
+
+  /* keeps the floating export bar clear of the iPhone home-bar / gesture area */
+  .safe-bottom { padding-bottom: env(safe-area-inset-bottom, 0px); }
+
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-thumb { background: #C7CEDA; border-radius: 999px; }
+
+  /* small "pop" animation played on a card when you tap Mark Picked Up */
+  @keyframes pop {
+    0%   { transform: scale(1); }
+    40%  { transform: scale(1.04); }
+    100% { transform: scale(1); }
+  }
+  .pop { animation: pop 0.22s ease; }
+</style>
+</head>
+<body class="min-h-screen safe-bottom pb-28">
+
+  <!-- ============================================================
+       HEADER
+       Title + (once a file is loaded) the filename and a "Change file" link.
+       ============================================================ -->
+  <header class="sticky top-0 z-30 bg-[var(--bg)]/95 backdrop-blur border-b border-[var(--line)]">
+    <div class="max-w-2xl mx-auto px-4 pt-4 pb-3">
+      <div class="flex items-center justify-between">
+        <div>
+          <h1 class="font-display text-2xl font-bold tracking-tight">Ready Line</h1>
+          <p class="text-xs text-[var(--muted)] font-medium">Order pickup board — ticket to table</p>
+        </div>
+        <div id="fileBadge" class="hidden text-right">
+          <p id="fileNameLabel" class="text-xs font-semibold text-[var(--muted)] max-w-[140px] truncate"></p>
+          <button id="changeFileBtn" class="text-xs font-bold text-[var(--notified)] underline">Change file</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main class="max-w-2xl mx-auto px-4 pt-4">
+
+    <!-- ============================================================
+         UPLOAD ZONE
+         A <label for="fileInput"> wraps everything so tapping ANYWHERE
+         in this box opens the file picker (no separate button needed).
+         Drag-and-drop is wired up in the JS section below.
+         ============================================================ -->
+    <section id="uploadSection">
+      <label for="fileInput" class="dropzone rounded-2xl flex flex-col items-center justify-center text-center py-10 px-6 cursor-pointer block bg-white/60">
+        <svg xmlns="http://www.w3.org/2000/svg" class="w-10 h-10 mb-3 text-[var(--muted)]" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M12 16.5V9m0 0-3 3m3-3 3 3M4.5 19.5h15A1.5 1.5 0 0 0 21 18V9a1.5 1.5 0 0 0-1.5-1.5H15L13.5 6h-3L9 7.5H4.5A1.5 1.5 0 0 0 3 9v9a1.5 1.5 0 0 0 1.5 1.5Z" />
+        </svg>
+        <p class="font-display font-bold text-base">Drop the order sheet here</p>
+        <p class="text-sm text-[var(--muted)] mt-1">or tap to choose a .xlsx / .csv file</p>
+        <p class="text-xs text-[var(--muted)] mt-3">Looks for columns: Timeslot, Name, Phone Number, Order</p>
+        <input id="fileInput" type="file" accept=".xlsx,.xls,.csv" class="hidden">
+      </label>
+      <!-- shown if the file can't be parsed or required columns are missing -->
+      <p id="uploadError" class="hidden mt-3 text-sm font-semibold text-red-600 bg-red-50 border border-red-200 rounded-xl px-4 py-3"></p>
+    </section>
+
+    <!-- ============================================================
+         STATS BAR — quick glance counts, hidden until a file is loaded.
+         Numbers are filled in by updateStats() in the JS below.
+         ============================================================ -->
+    <section id="statsBar" class="hidden grid grid-cols-3 gap-2 mt-4">
+      <div class="ticket-card px-3 py-3 text-center">
+        <p class="font-display text-xl font-bold" id="statTotal">0</p>
+        <p class="text-[10px] font-bold uppercase tracking-wide text-[var(--muted)]">Orders</p>
+      </div>
+      <div class="ticket-card px-3 py-3 text-center">
+        <p class="font-display text-xl font-bold text-[var(--notified)]" id="statNotified">0</p>
+        <p class="text-[10px] font-bold uppercase tracking-wide text-[var(--muted)]">Notified</p>
+      </div>
+      <div class="ticket-card px-3 py-3 text-center">
+        <p class="font-display text-xl font-bold text-[var(--done)]" id="statDone">0</p>
+        <p class="text-[10px] font-bold uppercase tracking-wide text-[var(--muted)]">Picked up</p>
+      </div>
+    </section>
+
+    <!-- This is where the JS injects one ticket card per order via render() -->
+    <section id="ordersList" class="mt-4 space-y-4"></section>
+
+    <p id="emptyState" class="hidden text-center text-sm text-[var(--muted)] mt-10">No orders yet — upload a sheet to fill the line.</p>
+  </main>
+
+  <!-- ============================================================
+       FLOATING EXPORT BUTTON
+       Fixed to the bottom of the screen so it's always reachable
+       with a thumb, no matter how far down the list you've scrolled.
+       ============================================================ -->
+  <div id="exportBar" class="hidden fixed bottom-0 left-0 right-0 z-40 bg-gradient-to-t from-[var(--bg)] via-[var(--bg)]/95 to-transparent pt-6 pb-4 safe-bottom">
+    <div class="max-w-2xl mx-auto px-4">
+      <button id="exportBtn" class="tap-btn w-full rounded-2xl font-display font-bold text-base bg-[var(--ink)] text-white shadow-lg flex items-center justify-center gap-2">
+        <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M4 16.5V18a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-1.5M7 10l5 5 5-5M12 15V3" />
+        </svg>
+        Download Event Summary
+      </button>
+    </div>
+  </div>
+
+<script>
+/* ================================================================
+   ALL APP LOGIC LIVES HERE.
+   Wrapped in an IIFE (function(){ ... })() so none of these
+   variables/functions leak into the global `window` object.
+   ================================================================ */
+(function(){
+  "use strict";
+
+  /* ----------------------------------------------------------------
+     STATE
+     `orders` is the single source of truth for everything on screen.
+     Every time it changes, we call render() to redraw the list.
+
+     Each order object looks like:
+     {
+       id:              'ord-3'            // internal unique id
+       raw:             {...}              // the ORIGINAL row from the spreadsheet
+                                            // (kept as-is so export can include
+                                            // every original column, untouched)
+       timeslotDisplay: '12:30 PM'         // human-readable timeslot for the card
+       timeslotMinutes: 750                // minutes-since-midnight, used for sorting
+       name:            'Jordan'
+       phone:           '717-555-0199'
+       order:           '2x burger, fries'
+       status:          'pending'          // 'pending' | 'notified' | 'reminded' | 'pickedup'
+       notifiedAt:      1720276800000      // Date.now() timestamp of the FIRST text,
+                                            // or null until "Notify Ready" is tapped
+     }
+     ---------------------------------------------------------------- */
+  let orders = [];
+  let colKeys = null;   // remembers which spreadsheet column matched each field,
+                         // e.g. { timeslot: 'Time Slot', name: 'Name', ... }
+
+  /* ---------- Grab references to the DOM elements we'll update ---------- */
+  const fileInput      = document.getElementById('fileInput');
+  const uploadSection   = document.getElementById('uploadSection');
+  const uploadError     = document.getElementById('uploadError');
+  const fileBadge       = document.getElementById('fileBadge');
+  const fileNameLabel   = document.getElementById('fileNameLabel');
+  const changeFileBtn   = document.getElementById('changeFileBtn');
+  const ordersList      = document.getElementById('ordersList');
+  const emptyState      = document.getElementById('emptyState');
+  const statsBar        = document.getElementById('statsBar');
+  const exportBar       = document.getElementById('exportBar');
+  const dropLabel       = document.querySelector('label[for="fileInput"]');
+
+
+  /* ================================================================
+     HELPER FUNCTIONS
+     ================================================================ */
+
+  // Detects iOS so we can format the sms: link correctly.
+  // iOS wants "sms:NUMBER&body=..."   (ampersand)
+  // Android/desktop wants "sms:NUMBER?body=..." (question mark)
+  function isIOS(){
+    return /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+  }
+
+  // Builds a ready-to-click sms: link for a given phone + message.
+  function buildSmsHref(phone, message){
+    const cleanPhone = String(phone).replace(/[^\d+]/g, ''); // strip dashes/spaces/parens
+    const sep = isIOS() ? '&' : '?';
+    return `sms:${cleanPhone}${sep}body=${encodeURIComponent(message)}`;
+  }
+
+  // Turns a header like "Phone Number" or "phone_number" into "phonenumber"
+  // so we can loosely match spreadsheet columns regardless of formatting.
+  function normalizeHeader(h){
+    return String(h).toLowerCase().replace(/[^a-z]/g, '');
+  }
+
+  // Looks at the keys of one sample row and returns whichever key contains
+  // one of the given patterns. e.g. patterns ['phone'] matches
+  // "Phone", "Phone Number", "Cell Phone", etc.
+  function findColumnKey(sampleRow, patterns){
+    const keys = Object.keys(sampleRow);
+    for (const pattern of patterns) {
+      const hit = keys.find(k => normalizeHeader(k).includes(pattern));
+      if (hit) return hit;
+    }
+    return null;
+  }
+
+  // Excel stores times as a fraction of a day (0.5 = noon) even when a cell
+  // is a full date+time serial. This pulls out just the time-of-day part
+  // and converts it to "minutes since midnight" for sorting.
+  function excelSerialToMinutes(serial){
+    const fraction = serial - Math.floor(serial);
+    return Math.round(fraction * 24 * 60);
+  }
+
+  // Converts whatever the "timeslot" cell contains (a JS Date, a raw Excel
+  // number, or a text string like "12:30 PM") into minutes-since-midnight
+  // so all rows can be sorted chronologically.
+  function parseTimeslotMinutes(val){
+    if (val instanceof Date && !isNaN(val)) {
+      return val.getHours() * 60 + val.getMinutes();
+    }
+    if (typeof val === 'number' && !isNaN(val)) {
+      return excelSerialToMinutes(val);
+    }
+    if (typeof val === 'string') {
+      const s = val.trim();
+      // matches "12:30", "12:30 PM", "12:30pm", "12:30 A.M." etc.
+      const m = s.match(/(\d{1,2}):(\d{2})\s*([APap]\.?[Mm]\.?)?/);
+      if (m) {
+        let h = parseInt(m[1], 10);
+        const min = parseInt(m[2], 10);
+        const ampm = m[3] ? m[3].toUpperCase().replace(/\./g, '') : null;
+        if (ampm === 'PM' && h !== 12) h += 12;
+        if (ampm === 'AM' && h === 12) h = 0;
+        return h * 60 + min;
+      }
+      // last resort: let the browser try to parse it as a date/time string
+      const d = new Date(s);
+      if (!isNaN(d)) return d.getHours() * 60 + d.getMinutes();
+    }
+    return 999999; // couldn't parse it — push it to the very end of the list
+  }
+
+  // Produces the friendly "12:30 PM" text shown on each card.
+  function formatTimeslotDisplay(val){
+    if (val instanceof Date && !isNaN(val)) {
+      return val.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    }
+    if (typeof val === 'number' && !isNaN(val)) {
+      const mins = excelSerialToMinutes(val);
+      const h = Math.floor(mins / 60), m = mins % 60;
+      const period = h >= 12 ? 'PM' : 'AM';
+      const h12 = h % 12 === 0 ? 12 : h % 12;
+      return `${h12}:${String(m).padStart(2, '0')} ${period}`;
+    }
+    return String(val); // already a plain string like "12:30 PM" — use as-is
+  }
+
+  // Prevents spreadsheet text from accidentally breaking the HTML we inject
+  // (e.g. an order note containing "<" or "&").
+  function escapeHtml(str){
+    return String(str).replace(/[&<>"']/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]));
+  }
+
+
+  /* ================================================================
+     FILE HANDLING
+     Reads the uploaded spreadsheet with SheetJS, figures out which
+     column is which, and builds the `orders` array.
+     ================================================================ */
+
+  function showError(msg){
+    uploadError.textContent = msg;
+    uploadError.classList.remove('hidden');
+  }
+  function clearError(){
+    uploadError.classList.add('hidden');
+    uploadError.textContent = '';
+  }
+
+  function handleFile(file){
+    clearError();
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = function(e){
+      try {
+        // 1. Parse the raw file bytes into a SheetJS workbook.
+        //    cellDates:true asks SheetJS to give us real JS Date objects
+        //    for date/time cells instead of raw Excel serial numbers.
+        const data = new Uint8Array(e.target.result);
+        const workbook = XLSX.read(data, { type: 'array', cellDates: true });
+
+        // 2. Grab the first sheet and turn it into an array of plain objects,
+        //    one object per row, keyed by the header row's text.
+        const firstSheetName = workbook.SheetNames[0];
+        const sheet = workbook.Sheets[firstSheetName];
+        const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+
+        if (!rows.length) {
+          showError('That file has no rows we could read. Double-check the sheet has a header row and data.');
+          return;
+        }
+
+        // 3. Figure out which actual column header corresponds to each
+        //    field we care about. This only needs to run once, using the
+        //    first row as a sample, since all rows share the same headers.
+        colKeys = {
+          timeslot: findColumnKey(rows[0], ['timeslot', 'time']),
+          name:     findColumnKey(rows[0], ['name']),
+          phone:    findColumnKey(rows[0], ['phonenumber', 'phone', 'cell', 'mobile']),
+          order:    findColumnKey(rows[0], ['orderdetails', 'order'])
+        };
+
+        // Bail out with a helpful message if any required column is missing.
+        const missing = Object.entries(colKeys).filter(([, v]) => !v).map(([k]) => k);
+        if (missing.length) {
+          showError(`Couldn't find a column for: ${missing.join(', ')}. Check the sheet's headers and try again.`);
+          return;
+        }
+
+        // 4. Build our internal `orders` array from the raw rows.
+        //    `raw: row` keeps a full copy of the ORIGINAL row so the export
+        //    step later can write back every original column untouched.
+        orders = rows.map((row, idx) => {
+          const rawTimeslot = row[colKeys.timeslot];
+          return {
+            id: 'ord-' + idx,
+            raw: row,
+            timeslotDisplay: formatTimeslotDisplay(rawTimeslot),
+            timeslotMinutes: parseTimeslotMinutes(rawTimeslot),
+            name:  String(row[colKeys.name]  ?? '').trim() || 'Guest',
+            phone: String(row[colKeys.phone] ?? '').trim(),
+            order: String(row[colKeys.order] ?? '').trim() || '—',
+            status: 'pending',   // every order starts as pending / not yet texted
+            notifiedAt: null
+          };
+        });
+
+        // 5. Sort chronologically by timeslot before the first render.
+        orders.sort((a, b) => a.timeslotMinutes - b.timeslotMinutes);
+
+        // 6. Swap the UI from "upload" mode into "dashboard" mode.
+        fileNameLabel.textContent = file.name;
+        fileBadge.classList.remove('hidden');
+        uploadSection.classList.add('hidden');
+        statsBar.classList.remove('hidden');
+        exportBar.classList.remove('hidden');
+
+        render();
+      } catch (err) {
+        console.error(err);
+        showError('Could not read that file. Make sure it is a valid .xlsx, .xls, or .csv file.');
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  }
+
+  // Fired when someone taps the upload zone and picks a file.
+  fileInput.addEventListener('change', (e) => {
+    if (e.target.files && e.target.files[0]) handleFile(e.target.files[0]);
+  });
+
+  // Drag-and-drop wiring: highlight the drop zone while dragging over it...
+  ['dragenter', 'dragover'].forEach(evt => {
+    dropLabel.addEventListener(evt, (e) => {
+      e.preventDefault(); e.stopPropagation();
+      dropLabel.classList.add('drag-over');
+    });
+  });
+  // ...and remove the highlight once the drag leaves or a drop happens.
+  ['dragleave', 'drop'].forEach(evt => {
+    dropLabel.addEventListener(evt, (e) => {
+      e.preventDefault(); e.stopPropagation();
+      dropLabel.classList.remove('drag-over');
+    });
+  });
+  // Actually handle the dropped file.
+  dropLabel.addEventListener('drop', (e) => {
+    const file = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (file) handleFile(file);
+  });
+
+  // "Change file" link in the header: wipes everything and goes back
+  // to the upload screen so a new sheet can be loaded.
+  changeFileBtn.addEventListener('click', () => {
+    orders = [];
+    colKeys = null;
+    fileInput.value = '';
+    fileBadge.classList.add('hidden');
+    uploadSection.classList.remove('hidden');
+    statsBar.classList.add('hidden');
+    exportBar.classList.add('hidden');
+    ordersList.innerHTML = '';
+    emptyState.classList.remove('hidden');
+  });
+
+
+  /* ================================================================
+     RENDERING
+     Everything here is "dumb": it just reads the current `orders`
+     array and rebuilds the HTML. There is no partial-update logic —
+     any change to state calls render() and the whole list redraws.
+     This keeps the code simple at the (very small, since lists here
+     are short) cost of re-rendering more than strictly necessary.
+     ================================================================ */
+
+  // Returns the CSS classes + label text for a given status,
+  // used for both the colored rail and the small chip badge.
+  function statusMeta(status){
+    switch (status) {
+      case 'notified': return { rail: 'rail-notified', chip: 'chip-notified', label: 'Texted' };
+      case 'reminded': return { rail: 'rail-reminded', chip: 'chip-reminded', label: 'Reminded' };
+      case 'pickedup': return { rail: 'rail-done',     chip: 'chip-done',     label: 'Picked up' };
+      default:         return { rail: 'rail-pending',  chip: 'chip-pending',  label: 'Waiting' };
+    }
+  }
+
+  // Builds the HTML string for ONE order's ticket card.
+  function cardTemplate(o){
+    const meta = statusMeta(o.status);
+    const canRemind = o.status === 'notified' || o.status === 'reminded';
+    const isPickedUp = o.status === 'pickedup';
+
+    return `
+      <article class="ticket-card" data-id="${o.id}">
+        <div class="status-rail ${meta.rail}"></div>
+
+        <!-- Info section: timeslot, name, phone, order -->
+        <div class="pl-5 pr-4 pt-4 pb-4">
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <p class="font-mono text-xs font-semibold text-[var(--muted)] tracking-wide">${escapeHtml(o.timeslotDisplay)}</p>
+              <h3 class="font-display text-lg font-bold leading-tight mt-0.5">${escapeHtml(o.name)}</h3>
+            </div>
+            <span class="status-chip ${meta.chip}">${meta.label}</span>
+          </div>
+          <div class="mt-2 space-y-0.5">
+            <p class="text-sm text-[var(--muted)] font-mono">${escapeHtml(o.phone || 'No phone on file')}</p>
+            <p class="text-sm font-medium">${escapeHtml(o.order)}</p>
+          </div>
+        </div>
+
+        <div class="perforation"></div>
+
+        <!-- Action zone: the 3 buttons -->
+        <div class="px-4 pt-4 pb-4 grid grid-cols-1 gap-2">
+
+          <!-- BUTTON 1: Notify Ready.
+               This is a real <a href="sms:..."> link so the phone's own
+               "open Messages?" prompt fires directly off the tap (more
+               reliable on iOS Safari than doing it from JS). Once tapped,
+               data-action="notify" below flips the order to 'notified'. -->
+          <a
+            href="${o.status === 'pending' ? buildSmsHref(o.phone, `${o.name}, your order of ${o.order} is ready for pickup!`) : '#'}"
+            data-action="notify"
+            data-id="${o.id}"
+            class="tap-btn rounded-xl flex items-center justify-center font-display font-bold text-sm ${o.status === 'pending' ? 'btn-notify' : 'btn-notified-done'}"
+            ${o.status === 'pending' ? '' : 'aria-disabled="true"'}
+          >
+            ${o.status === 'pending' ? '📱 Notify Ready' : '✓ Notified'}
+          </a>
+
+          <!-- BUTTON 2: Send Reminder.
+               Disabled (grayed out, unclickable) until status is
+               'notified' or 'reminded'. The actual sms: link is built
+               fresh at click-time in JS, because the elapsed-minutes
+               text needs to be calculated at the moment of the tap. -->
+          <a
+            href="#"
+            data-action="remind"
+            data-id="${o.id}"
+            class="tap-btn rounded-xl flex items-center justify-center font-display font-bold text-sm ${canRemind ? (o.status === 'reminded' ? 'btn-reminded-done' : 'btn-reminder') : 'btn-reminder'}"
+            style="${canRemind ? '' : 'opacity:0.4; pointer-events:none;'}"
+          >
+            ${o.status === 'reminded' ? '↻ Reminder sent — send again' : '⏰ Send Reminder'}
+          </a>
+
+          <!-- BUTTON 3: Mark Picked Up.
+               Tapping toggles between pickedup <-> its previous status,
+               so a wrong tap can be undone without re-uploading anything. -->
+          <button
+            type="button"
+            data-action="pickup"
+            data-id="${o.id}"
+            class="tap-btn rounded-xl flex items-center justify-center font-display font-bold text-sm ${isPickedUp ? 'btn-pickup-done' : 'btn-pickup'}"
+          >
+            ${isPickedUp ? '✓ Picked Up' : '📦 Mark Picked Up'}
+          </button>
+        </div>
+      </article>
+    `;
+  }
+
+  // Redraws the whole order list from scratch based on current state.
+  function render(){
+    if (!orders.length) {
+      ordersList.innerHTML = '';
+      emptyState.classList.remove('hidden');
+      return;
+    }
+    emptyState.classList.add('hidden');
+    ordersList.innerHTML = orders.map(cardTemplate).join('');
+    updateStats();
+  }
+
+  // Updates the 3 numbers in the stats bar (Orders / Notified / Picked up).
+  function updateStats(){
+    document.getElementById('statTotal').textContent    = orders.length;
+    document.getElementById('statNotified').textContent = orders.filter(o => o.status !== 'pending').length;
+    document.getElementById('statDone').textContent     = orders.filter(o => o.status === 'pickedup').length;
+  }
+
+
+  /* ================================================================
+     INTERACTION (button clicks)
+     One click listener on the whole list (event delegation) instead
+     of attaching a listener to every button — this also means newly
+     rendered cards automatically work with no extra wiring needed.
+     ================================================================ */
+  ordersList.addEventListener('click', function(e){
+    // Find the nearest ancestor with a data-action attribute (works even
+    // if the tap landed on an icon/emoji inside the button).
+    const target = e.target.closest('[data-action]');
+    if (!target) return;
+
+    const id = target.getAttribute('data-id');
+    const order = orders.find(o => o.id === id);
+    if (!order) return;
+
+    const action = target.getAttribute('data-action');
+
+    // ----- Notify Ready -----
+    if (action === 'notify') {
+      if (order.status !== 'pending') { e.preventDefault(); return; } // already notified, ignore re-clicks
+      order.status = 'notified';
+      order.notifiedAt = Date.now();      // remember exactly when, for the reminder's elapsed-time math
+      // Don't preventDefault here — we WANT the sms: href to fire and open Messages.
+      // Re-render shortly after so the button flips to its "done" look.
+      setTimeout(render, 50);
+    }
+
+    // ----- Send Reminder -----
+    if (action === 'remind') {
+      if (order.status !== 'notified' && order.status !== 'reminded') { e.preventDefault(); return; }
+      e.preventDefault(); // we build the href ourselves below, so stop the '#' link from navigating
+      const elapsedMs  = Date.now() - order.notifiedAt;
+      const elapsedMin = Math.floor(elapsedMs / 60000);
+      const elapsedStr = elapsedMin < 1 ? 'a few' : String(elapsedMin); // spec: show "a few" if under 1 minute
+      const message = `${order.name}, your order of ${order.order} has been ready for ${elapsedStr} minutes!`;
+      window.location.href = buildSmsHref(order.phone, message); // open Messages with the reminder text
+      order.status = 'reminded';
+      render();
+    }
+
+    // ----- Mark Picked Up (toggle) -----
+    if (action === 'pickup') {
+      if (order.status === 'pickedup') {
+        // tapped again by mistake — undo, falling back to whatever status makes sense
+        order.status = order.notifiedAt ? 'notified' : 'pending';
+      } else {
+        order.status = 'pickedup';
+      }
+      render();
+      // little "pop" animation so the tap feels confirmed
+      requestAnimationFrame(() => {
+        const card = ordersList.querySelector(`[data-id="${id}"]`);
+        if (card) card.classList.add('pop');
+      });
+    }
+  });
+
+
+  /* ================================================================
+     EXPORT
+     Builds a new workbook containing every ORIGINAL column (via
+     o.raw) plus a new "Status" column, then triggers a download.
+     ================================================================ */
+  document.getElementById('exportBtn').addEventListener('click', function(){
+    if (!orders.length) return;
+
+    const exportRows = orders.map(o => ({
+      ...o.raw,                                                  // every original spreadsheet column, untouched
+      Status: o.status === 'pickedup' ? 'Picked Up' : 'Not Picked Up'
+    }));
+
+    const ws = XLSX.utils.json_to_sheet(exportRows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Event Summary');
+
+    // filename gets a timestamp so re-exports during the event don't overwrite each other
+    const ts = new Date();
+    const stamp = `${ts.getFullYear()}${String(ts.getMonth()+1).padStart(2,'0')}${String(ts.getDate()).padStart(2,'0')}-${String(ts.getHours()).padStart(2,'0')}${String(ts.getMinutes()).padStart(2,'0')}`;
+    XLSX.writeFile(wb, `event-summary-${stamp}.xlsx`);
+  });
+
+
+  /* ---------- Initial render (shows the empty state on first load) ---------- */
+  render();
+
+})();
+</script>
+</body>
+</html>
